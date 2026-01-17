@@ -34,17 +34,17 @@ __all__ = [
 # ==================== handlers/__init__.py ====================
 """T-League Bot - Handlers package"""
 
-# Пустой файл - импорты делаются в bot.py
+from handlers import user, admin, matches
 
-__all__ = []
+__all__ = ['user', 'admin', 'matches']
 
 
 # ==================== keyboards/__init__.py ====================
 """T-League Bot - Keyboards package"""
 
-# Пустой файл - импорты делаются напрямую
+from keyboards import user_kb, admin_kb
 
-__all__ = []
+__all__ = ['user_kb', 'admin_kb']
 
 
 # ==================== middlewares/__init__.py ====================
@@ -58,9 +58,19 @@ __all__ = ['MaintenanceMiddleware']
 # ==================== services/__init__.py ====================
 """T-League Bot - Services package"""
 
-# Пустой файл - импорты делаются напрямую
+from services.tournament import TournamentService
+from services.rating import RatingService
+from services.records import RecordsService
+from services.schedule import ScheduleService
+from services.notifications import NotificationService
 
-__all__ = []
+__all__ = [
+    'TournamentService',
+    'RatingService',
+    'RecordsService',
+    'ScheduleService',
+    'NotificationService',
+]
 
 
 # ==================== states/__init__.py ====================
@@ -71,9 +81,8 @@ from states.states import (
     MatchReport,
     AdminBroadcast,
     TesterAccess,
-    DeadlineSettings,
-    RatingRecalculation,
-    PlayerSearch
+    TournamentSettings,
+    RatingRecalculation
 )
 
 __all__ = [
@@ -81,15 +90,14 @@ __all__ = [
     'MatchReport',
     'AdminBroadcast',
     'TesterAccess',
-    'DeadlineSettings',
+    'TournamentSettings',
     'RatingRecalculation',
-    'PlayerSearch',
 ]
 
 
 # ==================== utils/__init__.py ====================
 """T-League Bot - Utilities package"""
 
-# Пустой файл - импорты делаются напрямую
+from utils.helpers import format_datetime, validate_score
 
-__all__ = []
+__all__ = ['format_datetime', 'validate_score']
