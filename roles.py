@@ -1,114 +1,228 @@
-"""Хендлеры управления ролями"""
-from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
-from aiogram.fsm.context import FSMContext
-from sqlalchemy import select
-from database.engine import async_session_maker
-from database.models import User, AdminRole
-from services.roles import RolesService
-from states.states import RoleGrant
+"""
+T-League Bot - Система ролей (5 уровней)
+"""
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
+from database.models import User, AdminRole, ModeratorAction
+from typing import Optional
+from datetime import datetime
 
-router = Router()
-
-@router.callback_query(F.data == "manage_roles")
-async def show_roles_menu(callback: CallbackQuery):
-    """Меню управления ролями (только для владельца)"""
-    async with async_session_maker() as session:
-        result = await session.execute(select(User).where(User.id == callback.from_user.id))
-        user = result.scalar_one()
-        
-        if user.admin_role != AdminRole.OWNER:
-            await callback.answer("❌ Только для владельца", show_alert=True)
-            return
+class RolesService:
+    """Сервис управления ролями"""
     
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Выдать роль", callback_data="grant_role")
-    kb.button(text="➖ Отозвать роль", callback_data="revoke_role")
-    kb.button(text="👥 Список ролей", callback_data="list_roles")
-    kb.button(text="◀️ Админ-панель", callback_data="admin_panel")
-    kb.adjust(2, 1, 1)
+    # Уровни доступа (чем выше число, тем выше уровень)
+    ROLE_LEVELS = {
+        AdminRole.MODERATOR: 1,   # Модератор
+        AdminRole.SUPERVISOR: 2,   # Следящий
+        AdminRole.ADMIN: 3,        # Администратор
+        AdminRole.CO_OWNER: 4,     # Совладелец
+        AdminRole.OWNER: 5         # Владелец
+    }
     
-    await callback.message.edit_text(
-        "👑 <b>Управление ролями</b>\n\n"
-        "Выдача и отзыв прав доступа",
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML"
-    )
-
-@router.callback_query(F.data == "grant_role")
-async def start_grant(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(RoleGrant.username)
-    await callback.message.answer("👤 Введите @username для выдачи роли:")
-
-@router.message(RoleGrant.username)
-async def grant_username(m: Message, state: FSMContext):
-    username = m.text.lstrip("@")
-    
-    async with async_session_maker() as session:
+    @staticmethod
+    async def grant_role(
+        session: AsyncSession,
+        user_id: int,
+        role: AdminRole,
+        granted_by: int
+    ) -> bool:
+        """Выдача роли пользователю"""
         result = await session.execute(
-            select(User).where(User.username == username)
+            select(User).where(User.id == user_id)
         )
         user = result.scalar_one_or_none()
         
         if not user:
-            await m.answer("❌ Пользователь не найден")
-            return
+            return False
         
-        await state.update_data(target_user_id=user.id, target_username=username)
+        user.admin_role = role
+        user.granted_by = granted_by
+        user.role_granted_at = datetime.utcnow()
+        user.is_admin = True
         
-        from aiogram.utils.keyboard import InlineKeyboardBuilder
-        kb = InlineKeyboardBuilder()
-        for role in [AdminRole.MODERATOR, AdminRole.SUPERVISOR, AdminRole.ADMIN, AdminRole.CO_OWNER]:
-            kb.button(
-                text=RolesService.format_role_name(role),
-                callback_data=f"select_role_{role.value}"
-            )
-        kb.button(text="❌ Отмена", callback_data="manage_roles")
-        kb.adjust(2)
-        
-        await m.answer(
-            f"Выберите роль для @{username}:",
-            reply_markup=kb.as_markup()
-        )
-        await state.set_state(RoleGrant.role)
-
-@router.callback_query(RoleGrant.role, F.data.startswith("select_role_"))
-async def confirm_grant(callback: CallbackQuery, state: FSMContext):
-    role_value = callback.data.split("_")[2]
-    role = AdminRole(role_value)
+        await session.commit()
+        return True
     
-    data = await state.get_data()
-    user_id = data['target_user_id']
-    username = data['target_username']
-    
-    async with async_session_maker() as session:
-        await RolesService.grant_role(session, user_id, role, callback.from_user.id)
-    
-    await callback.message.edit_text(
-        f"✅ Роль {RolesService.format_role_name(role)} выдана @{username}"
-    )
-    await state.clear()
-
-@router.callback_query(F.data == "list_roles")
-async def list_roles(callback: CallbackQuery):
-    async with async_session_maker() as session:
+    @staticmethod
+    async def revoke_role(
+        session: AsyncSession,
+        user_id: int
+    ) -> bool:
+        """Отзыв роли"""
         result = await session.execute(
-            select(User).where(User.admin_role.isnot(None))
+            select(User).where(User.id == user_id)
         )
-        users = result.scalars().all()
+        user = result.scalar_one_or_none()
         
-        if not users:
-            await callback.answer("Нет выданных ролей", show_alert=True)
-            return
+        if not user:
+            return False
         
-        text = "👥 <b>Список ролей</b>\n\n"
-        for user in users:
-            text += f"{RolesService.format_role_name(user.admin_role)}\n"
-            text += f"└ @{user.username or user.full_name}\n\n"
+        user.admin_role = None
+        user.granted_by = None
+        user.role_granted_at = None
+        user.is_admin = False
         
-        from aiogram.utils.keyboard import InlineKeyboardBuilder
-        kb = InlineKeyboardBuilder()
-        kb.button(text="◀️ Назад", callback_data="manage_roles")
+        await session.commit()
+        return True
+    
+    @staticmethod
+    async def get_user_role(session: AsyncSession, user_id: int) -> Optional[AdminRole]:
+        """Получение роли пользователя"""
+        result = await session.execute(
+            select(User).where(User.id == user_id)
+        )
+        user = result.scalar_one_or_none()
+        return user.admin_role if user else None
+    
+    @staticmethod
+    def can_grant_role(granter_role: AdminRole, target_role: AdminRole) -> bool:
+        """Проверка, может ли granter выдать target_role"""
+        # Только владелец может выдавать роли
+        return granter_role == AdminRole.OWNER
+    
+    @staticmethod
+    def can_manage_user(manager_role: AdminRole, target_role: Optional[AdminRole]) -> bool:
+        """Проверка, может ли manager управлять target"""
+        if manager_role == AdminRole.OWNER:
+            return True
         
-        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        if not target_role:
+            return False
+        
+        manager_level = RolesService.ROLE_LEVELS.get(manager_role, 0)
+        target_level = RolesService.ROLE_LEVELS.get(target_role, 0)
+        
+        return manager_level > target_level
+    
+    @staticmethod
+    def has_permission(role: Optional[AdminRole], permission: str) -> bool:
+        """Проверка наличия разрешения"""
+        if not role:
+            return False
+        
+        permissions = {
+            AdminRole.MODERATOR: {
+                'approve_listings',
+                'reject_listings', 
+                'resolve_disputes',
+                'view_disputes'
+            },
+            AdminRole.SUPERVISOR: {
+                'approve_listings',
+                'reject_listings',
+                'resolve_disputes',
+                'view_disputes',
+                'view_moderator_logs'
+            },
+            AdminRole.ADMIN: {
+                'approve_listings',
+                'reject_listings',
+                'resolve_disputes',
+                'view_disputes',
+                'view_moderator_logs',
+                'create_tournament',
+                'manage_own_tournaments'
+            },
+            AdminRole.CO_OWNER: {
+                'approve_listings',
+                'reject_listings',
+                'resolve_disputes',
+                'view_disputes',
+                'view_moderator_logs',
+                'create_tournament',
+                'manage_own_tournaments',
+                'manage_all_tournaments',
+                'broadcast',
+                'export_data',
+                'recalculate_ratings'
+            },
+            AdminRole.OWNER: {
+                'approve_listings',
+                'reject_listings',
+                'resolve_disputes',
+                'view_disputes',
+                'view_moderator_logs',
+                'create_tournament',
+                'manage_own_tournaments',
+                'manage_all_tournaments',
+                'broadcast',
+                'export_data',
+                'recalculate_ratings',
+                'grant_roles',
+                'revoke_roles',
+                'full_access'
+            }
+        }
+        
+        return permission in permissions.get(role, set())
+    
+    @staticmethod
+    async def get_moderator_actions(
+        session: AsyncSession,
+        moderator_id: Optional[int] = None,
+        limit: int = 50
+    ) -> list:
+        """Получение логов действий модераторов"""
+        query = select(ModeratorAction, User).join(
+            User, ModeratorAction.moderator_id == User.id
+        ).order_by(ModeratorAction.created_at.desc())
+        
+        if moderator_id:
+            query = query.where(ModeratorAction.moderator_id == moderator_id)
+        
+        query = query.limit(limit)
+        
+        result = await session.execute(query)
+        return result.all()
+    
+    @staticmethod
+    def format_role_name(role: AdminRole) -> str:
+        """Форматирование названия роли"""
+        names = {
+            AdminRole.MODERATOR: "👮 Модератор",
+            AdminRole.SUPERVISOR: "👁️ Следящий",
+            AdminRole.ADMIN: "⚙️ Администратор",
+            AdminRole.CO_OWNER: "👑 Совладелец",
+            AdminRole.OWNER: "🔱 Владелец"
+        }
+        return names.get(role, "❓ Неизвестная роль")
+    
+    @staticmethod
+    def format_permissions(role: AdminRole) -> str:
+        """Форматирование списка разрешений"""
+        descriptions = {
+            AdminRole.MODERATOR: (
+                "📋 <b>Возможности:</b>\n"
+                "• Одобрение/отклонение заявок на продажу\n"
+                "• Решение оспоренных матчей\n"
+                "• Связь с игроками для уточнения счёта"
+            ),
+            AdminRole.SUPERVISOR: (
+                "📋 <b>Возможности:</b>\n"
+                "• Всё от Модератора\n"
+                "• Просмотр логов действий модераторов\n"
+                "• Контроль работы модераторов"
+            ),
+            AdminRole.ADMIN: (
+                "📋 <b>Возможности:</b>\n"
+                "• Всё от Модератора и Следящего\n"
+                "• Создание турниров\n"
+                "• Управление своими турнирами"
+            ),
+            AdminRole.CO_OWNER: (
+                "📋 <b>Возможности:</b>\n"
+                "• Всё от предыдущих уровней\n"
+                "• Управление всеми турнирами\n"
+                "• Массовые рассылки\n"
+                "• Экспорт данных\n"
+                "• Пересчёт рейтингов"
+            ),
+            AdminRole.OWNER: (
+                "📋 <b>Возможности:</b>\n"
+                "• ПОЛНЫЙ доступ ко всему\n"
+                "• Выдача/отзыв ролей\n"
+                "• Управление совладельцами\n"
+                "• Управление турнирами любого уровня"
+            )
+        }
+        return descriptions.get(role, "Нет описания")
